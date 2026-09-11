@@ -46,8 +46,11 @@ const transport = new StdioClientTransport({
 const client = new Client({ name: 'flux-cloud-mcp-deploy', version: '0' });
 await client.connect(transport);
 
+// wait_for_app can run for minutes; the SDK's default request timeout is 60 s.
 const call = async (name, toolArgs = {}) => {
-  const result = await client.callTool({ name, arguments: toolArgs });
+  const result = await client.callTool({ name, arguments: toolArgs }, undefined, {
+    timeout: 10 * 60 * 1000,
+  });
   return JSON.parse(result.content[0].text);
 };
 

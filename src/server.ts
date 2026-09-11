@@ -45,7 +45,7 @@ import {
 } from './spec.js';
 
 export const SERVER_NAME = 'flux-cloud';
-export const SERVER_VERSION = '0.2.0';
+export const SERVER_VERSION = '0.2.1';
 
 // ---------------------------------------------------------------------------
 // Schemas shared by several tools
@@ -798,7 +798,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     {
       title: 'Wait for a deployment to be accepted and its instances to run',
       description:
-        'Polls the network for up to timeoutSeconds (default 300, max 600). Returns payment confirmations, whether the ' +
+        'Polls the network for up to timeoutSeconds (default 45 to fit hosts with a 60 s tool timeout, max 600). Returns payment confirmations, whether the ' +
         'spec was accepted, and the running instances with URLs. Safe to call repeatedly until done=true.',
       inputSchema: {
         name: z.string(),
@@ -810,7 +810,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
           .string()
           .optional()
           .describe('For updates: the hash of the previous spec, so acceptance means a new hash.'),
-        timeoutSeconds: z.number().int().min(10).max(600).default(300),
+        timeoutSeconds: z.number().int().min(10).max(600).default(45),
       },
     },
     async ({ name, txid, previousHash, timeoutSeconds }, config) => {
