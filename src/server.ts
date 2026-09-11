@@ -45,7 +45,7 @@ import {
 } from './spec.js';
 
 export const SERVER_NAME = 'flux-cloud';
-export const SERVER_VERSION = '0.1.0';
+export const SERVER_VERSION = '0.1.1';
 
 // ---------------------------------------------------------------------------
 // Schemas shared by several tools

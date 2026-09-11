@@ -173,10 +173,16 @@ export function formatSpecification(spec: SpecInput & { owner: string }): AppSpe
     name,
     description: String(spec.description ?? ''),
     owner: String(spec.owner),
-    // A single unnamed component takes the app's name, as Flux Cloud does.
-    compose: compose.map((c, i) =>
-      formatComponent({ ...c, name: c.name ?? (compose.length === 1 ? name : `${name}${i + 1}`) }),
-    ),
+    // A single unnamed component takes the app's name, as Flux Cloud does, and
+    // an undescribed one is described by its name so the spec stays valid.
+    compose: compose.map((c, i) => {
+      const componentName = c.name ?? (compose.length === 1 ? name : `${name}${i + 1}`);
+      return formatComponent({
+        ...c,
+        name: componentName,
+        description: c.description || `${componentName} component of ${name}`,
+      });
+    }),
     instances: Number(spec.instances ?? 3),
     contacts: (spec.contacts ?? []).map(String),
     geolocation: (spec.geolocation ?? []).map(String),

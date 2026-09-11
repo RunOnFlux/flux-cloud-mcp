@@ -199,3 +199,15 @@ test('legacy published specs are normalized to v8 shape', async () => {
   assert.equal(normalized.compose[0]!.name, 'Old');
   assert.equal(normalized.expire, BLOCKS_PER_MONTH);
 });
+
+test('formatSpecification fills a missing component name and description', () => {
+  const spec = formatSpecification({
+    name: 'bare',
+    description: 'd',
+    owner: OWNER,
+    compose: [{ repotag: 'nginx:1.27', containerData: 'r:/data', cpu: 0.5, ram: 500, hdd: 5 }],
+  });
+  assert.equal(spec.compose[0]!.name, 'bare');
+  assert.equal(spec.compose[0]!.description, 'bare component of bare');
+  assert.deepEqual(validateSpecification(spec), []);
+});
