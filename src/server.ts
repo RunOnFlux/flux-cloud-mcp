@@ -5,7 +5,7 @@
  * minimum is never surfaced as a quote.
  */
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer, type ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { Config } from './config.js';
 import { toFlux } from './chain.js';
@@ -45,7 +45,7 @@ import {
 } from './spec.js';
 
 export const SERVER_NAME = 'flux-cloud';
-export const SERVER_VERSION = '0.1.1';
+export const SERVER_VERSION = '0.2.0';
 
 // ---------------------------------------------------------------------------
 // Schemas shared by several tools
@@ -260,16 +260,75 @@ function urlsFor(spec: PublishedAppSpec | AppSpec, locations: Array<{ ip: string
 // Server
 // ---------------------------------------------------------------------------
 
-export function createServer(config: Config): McpServer {
+export interface ServerOptions {
+  /**
+   * Hosted mode: the server holds no keys. Tools that need them take
+   * `fluxIdPrivateKey` and `paymentPrivateKey` as call arguments, used in
+   * memory for that call only and never logged or stored.
+   */
+  hosted?: boolean;
+}
+
+const KeysShape = {
+  fluxIdPrivateKey: z
+    .string()
+    .optional()
+    .describe(
+      'WIF private key of the Flux ID that owns the app. Use a dedicated key from flux_generate_keys, never a main wallet key.',
+    ),
+  paymentPrivateKey: z
+    .string()
+    .optional()
+    .describe(
+      'WIF private key of the Flux address that pays. Fund it with only what you intend to spend.',
+    ),
+};
+
+type KeyArgs = { fluxIdPrivateKey?: string | undefined; paymentPrivateKey?: string | undefined };
+
+function withKeys(base: Config, args: KeyArgs): Config {
+  return {
+    ...base,
+    ownerWif: args.fluxIdPrivateKey?.trim() || base.ownerWif,
+    payerWif: args.paymentPrivateKey?.trim() || base.payerWif,
+  };
+}
+
+const LOCAL_INSTRUCTIONS =
+  'Deploy and manage apps on Flux Cloud, the decentralized cloud. Read the flux://guide/overview resource first. ' +
+  'All prices are Flux Cloud USD prices (converted to FLUX for payment). Always show the user the USD quote from ' +
+  'flux_quote_app and get their agreement before calling flux_deploy_app with confirm=true, which spends FLUX.';
+
+const HOSTED_INSTRUCTIONS =
+  LOCAL_INSTRUCTIONS +
+  ' This is the hosted server: it stores no keys. Read-only tools need none. Tools that sign or pay take ' +
+  'fluxIdPrivateKey and paymentPrivateKey as arguments, used only for that call. NEVER ask the user for the keys of ' +
+  'a wallet they use elsewhere: call flux_generate_keys to create a dedicated pair, tell the user to fund the payment ' +
+  'address with only the amount needed, and reuse that pair in later calls. Remind the user to save the keys.';
+
+export function createServer(baseConfig: Config, options: ServerOptions = {}): McpServer {
+  const hosted = options.hosted === true;
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
-    {
-      instructions:
-        'Deploy and manage apps on Flux Cloud, the decentralized cloud. Read the flux://guide/overview resource first. ' +
-        'All prices are Flux Cloud USD prices (converted to FLUX for payment). Always show the user the USD quote from ' +
-        'flux_quote_app and get their agreement before calling flux_deploy_app with confirm=true, which spends FLUX.',
-    },
+    { instructions: hosted ? HOSTED_INSTRUCTIONS : LOCAL_INSTRUCTIONS },
   );
+
+  /**
+   * Register a tool whose handler receives the effective config: in hosted
+   * mode the call's own keys (if any) layered over the base config.
+   */
+  function tool<S extends z.ZodRawShape>(
+    name: string,
+    meta: { title: string; description: string; inputSchema: S },
+    handler: (args: z.infer<z.ZodObject<S>>, config: Config) => Promise<ToolResult>,
+  ): void {
+    const inputSchema = (hosted ? { ...meta.inputSchema, ...KeysShape } : meta.inputSchema) as S;
+    const callback = (async (args: unknown) => {
+      const typed = args as z.infer<z.ZodObject<S>> & KeyArgs;
+      return handler(typed, withKeys(baseConfig, typed));
+    }) as ToolCallback<S>;
+    server.registerTool(name, { ...meta, inputSchema }, callback);
+  }
 
   // ----- resources --------------------------------------------------------
 
@@ -344,7 +403,7 @@ export function createServer(config: Config): McpServer {
     component: string | undefined,
     nodeIp: string | undefined,
   ): Promise<{ target: string; container: string }> {
-    const lb = api(config);
+    const lb = api(baseConfig);
     const [spec, locations] = await Promise.all([publishedSpec(lb, name), appLocations(lb, name)]);
     if (!spec) throw new Error(`${name} is not registered on the network.`);
     const target = nodeIp ?? locations[0]?.ip;
@@ -365,7 +424,7 @@ export function createServer(config: Config): McpServer {
 
   // ----- identity ---------------------------------------------------------
 
-  server.registerTool(
+  tool(
     'flux_get_identity',
     {
       title: 'Show the configured Flux identity and balance',
@@ -374,7 +433,7 @@ export function createServer(config: Config): McpServer {
         'Explains what to configure if keys are missing. Never returns private keys.',
       inputSchema: {},
     },
-    async () => {
+    async (_args, config) => {
       try {
         const owner = config.ownerWif ? identityFromWif(config.ownerWif) : undefined;
         const payer = config.payerWif ? identityFromWif(config.payerWif) : undefined;
@@ -402,8 +461,9 @@ export function createServer(config: Config): McpServer {
           ...(owner && payer
             ? {}
             : {
-                setup:
-                  'Set FLUX_ID_PRIVATE_KEY (owner) and FLUX_PAYMENT_PRIVATE_KEY (payer) in the MCP server environment, or run flux_generate_keys.',
+                setup: hosted
+                  ? 'No keys were passed. Run flux_generate_keys once, then pass fluxIdPrivateKey and paymentPrivateKey to tools that need them.'
+                  : 'Set FLUX_ID_PRIVATE_KEY (owner) and FLUX_PAYMENT_PRIVATE_KEY (payer) in the MCP server environment, or run flux_generate_keys.',
               }),
           ...(payer && balance && balance.spendableFlux === 0
             ? {
@@ -417,7 +477,7 @@ export function createServer(config: Config): McpServer {
     },
   );
 
-  server.registerTool(
+  tool(
     'flux_generate_keys',
     {
       title: 'Generate a new Flux ID and payment key pair',
@@ -427,25 +487,31 @@ export function createServer(config: Config): McpServer {
         'FLUX_PAYMENT_PRIVATE_KEY, then restart the server. Nothing is stored or sent anywhere by this tool.',
       inputSchema: {},
     },
-    async () => {
+    async (_args, _config) => {
       const owner = generateIdentity();
       const payer = generateIdentity();
       return ok({
         fluxId: { address: owner.zelid, privateKeyWif: owner.wif },
         payment: { address: payer.fluxAddress, privateKeyWif: payer.wif },
         env: { FLUX_ID_PRIVATE_KEY: owner.wif, FLUX_PAYMENT_PRIVATE_KEY: payer.wif },
-        next: [
-          'Save both private keys somewhere safe; they cannot be recovered.',
-          'Put the env values into the MCP server configuration and restart it.',
-          `Send FLUX to ${payer.fluxAddress} to fund deployments.`,
-        ],
+        next: hosted
+          ? [
+              'Show both private keys to the user and tell them to save them; they cannot be recovered.',
+              'Pass them as fluxIdPrivateKey and paymentPrivateKey in later tool calls.',
+              `The user funds ${payer.fluxAddress} with only the FLUX needed for their deployments.`,
+            ]
+          : [
+              'Save both private keys somewhere safe; they cannot be recovered.',
+              'Put the env values into the MCP server configuration and restart it.',
+              `Send FLUX to ${payer.fluxAddress} to fund deployments.`,
+            ],
       });
     },
   );
 
   // ----- pricing ----------------------------------------------------------
 
-  server.registerTool(
+  tool(
     'flux_get_pricing',
     {
       title: 'Get the Flux Cloud rate card',
@@ -454,7 +520,7 @@ export function createServer(config: Config): McpServer {
         'a few reference sizes. Use flux_quote_app for the exact price of a specific app.',
       inputSchema: {},
     },
-    async () => {
+    async (_args, config) => {
       try {
         const [rates, fluxUsd] = await Promise.all([
           fetchUsdRates(config.statsUrl),
@@ -513,18 +579,24 @@ export function createServer(config: Config): McpServer {
 
   // ----- spec building & validation --------------------------------------
 
-  server.registerTool(
+  tool(
     'flux_build_spec',
     {
       title: 'Build a Flux app specification from a simple description',
       description:
         'Turns images, ports, resources and a term into a complete, correctly formatted v8 specification, with public ' +
         'ports auto-picked and data replication enabled. Returns the spec plus local validation errors and warnings.',
-      inputSchema: SimpleAppSchema.shape,
+      inputSchema: {
+        ...SimpleAppSchema.shape,
+        owner: z
+          .string()
+          .optional()
+          .describe('Flux ID that will own the app. Defaults to the configured or passed key.'),
+      },
     },
-    async (input) => {
+    async ({ owner, ...input }, config) => {
       try {
-        const spec = buildSpecification({ ...input, owner: ownerOf(config) });
+        const spec = buildSpecification({ ...input, owner: ownerOf(config, owner) });
         const errors = validateSpecification(spec);
         return ok({
           spec,
@@ -539,7 +611,7 @@ export function createServer(config: Config): McpServer {
     },
   );
 
-  server.registerTool(
+  tool(
     'flux_validate_spec',
     {
       title: 'Validate a specification locally and on the network',
@@ -551,7 +623,7 @@ export function createServer(config: Config): McpServer {
         network: z.boolean().default(true).describe('Also verify on a FluxOS node.'),
       },
     },
-    async ({ spec, network }) => {
+    async ({ spec, network }, config) => {
       try {
         const formatted = formatSpecification({ ...spec, owner: ownerOf(config, spec.owner) });
         const errors = validateSpecification(formatted);
@@ -588,7 +660,7 @@ export function createServer(config: Config): McpServer {
     },
   );
 
-  server.registerTool(
+  tool(
     'flux_quote_app',
     {
       title: 'Quote the price of an app in USD and FLUX',
@@ -597,7 +669,7 @@ export function createServer(config: Config): McpServer {
         'already exists (the unused part of the current term is credited). Price is in USD with the FLUX amount at market rate.',
       inputSchema: { spec: SpecSchema },
     },
-    async ({ spec }) => {
+    async ({ spec }, config) => {
       try {
         const formatted = formatSpecification({ ...spec, owner: ownerOf(config, spec.owner) });
         const errors = validateSpecification(formatted);
@@ -630,7 +702,7 @@ export function createServer(config: Config): McpServer {
         'When set, spec.compose should be [] and spec.enterprise "".',
     );
 
-  server.registerTool(
+  tool(
     'flux_deploy_app',
     {
       title: 'Deploy (register or update) an app and pay for it',
@@ -648,7 +720,7 @@ export function createServer(config: Config): McpServer {
           .describe('Set true to actually sign, broadcast and pay.'),
       },
     },
-    async ({ spec, enterprise, confirm }) => {
+    async ({ spec, enterprise, confirm }, config) => {
       const log: string[] = [];
       try {
         const enterpriseInput: EnterpriseInput | undefined = enterprise
@@ -721,7 +793,7 @@ export function createServer(config: Config): McpServer {
     },
   );
 
-  server.registerTool(
+  tool(
     'flux_wait_for_app',
     {
       title: 'Wait for a deployment to be accepted and its instances to run',
@@ -741,7 +813,7 @@ export function createServer(config: Config): McpServer {
         timeoutSeconds: z.number().int().min(10).max(600).default(300),
       },
     },
-    async ({ name, txid, previousHash, timeoutSeconds }) => {
+    async ({ name, txid, previousHash, timeoutSeconds }, config) => {
       try {
         const result = await waitForApp(config, name, {
           txid,
@@ -775,7 +847,7 @@ export function createServer(config: Config): McpServer {
 
   // ----- inspect ----------------------------------------------------------
 
-  server.registerTool(
+  tool(
     'flux_get_app',
     {
       title: 'Get a deployed app: spec, status, instances, URLs',
@@ -783,7 +855,7 @@ export function createServer(config: Config): McpServer {
         'Looks up any app on the network by name and returns its published specification, expiry, running instances and URLs.',
       inputSchema: { name: z.string() },
     },
-    async ({ name }) => {
+    async ({ name }, config) => {
       try {
         const lb = api(config);
         const [spec, locations, info] = await Promise.all([
@@ -817,7 +889,7 @@ export function createServer(config: Config): McpServer {
     },
   );
 
-  server.registerTool(
+  tool(
     'flux_list_my_apps',
     {
       title: 'List apps owned by the configured Flux ID',
@@ -828,7 +900,7 @@ export function createServer(config: Config): McpServer {
         nameContains: z.string().optional().describe('Only apps whose name contains this text.'),
       },
     },
-    async ({ owner, nameContains }) => {
+    async ({ owner, nameContains }, config) => {
       try {
         const zelid = ownerOf(config, owner);
         const lb = api(config);
@@ -867,7 +939,7 @@ export function createServer(config: Config): McpServer {
     },
   );
 
-  server.registerTool(
+  tool(
     'flux_get_app_logs',
     {
       title: 'Read container logs from a running instance',
@@ -883,7 +955,7 @@ export function createServer(config: Config): McpServer {
           .describe('ip[:port] of the instance; defaults to the first running one.'),
       },
     },
-    async ({ name, component, lines, nodeIp }) => {
+    async ({ name, component, lines, nodeIp }, config) => {
       try {
         const session = currentSession(requireOwnerWif(config));
         const { target, container } = await resolveContainer(name, component, nodeIp);
@@ -899,7 +971,7 @@ export function createServer(config: Config): McpServer {
     },
   );
 
-  server.registerTool(
+  tool(
     'flux_get_app_stats',
     {
       title: 'Get live resource usage of a running instance',
@@ -911,7 +983,7 @@ export function createServer(config: Config): McpServer {
         nodeIp: z.string().optional(),
       },
     },
-    async ({ name, component, nodeIp }) => {
+    async ({ name, component, nodeIp }, config) => {
       try {
         const session = currentSession(requireOwnerWif(config));
         const { target, container } = await resolveContainer(name, component, nodeIp);
@@ -929,7 +1001,7 @@ export function createServer(config: Config): McpServer {
 
   // ----- control ----------------------------------------------------------
 
-  server.registerTool(
+  tool(
     'flux_control_app',
     {
       title: 'Restart, redeploy or remove app instances',
@@ -948,7 +1020,7 @@ export function createServer(config: Config): McpServer {
         hard: z.boolean().default(false).describe('For redeploy: also delete the app data.'),
       },
     },
-    async ({ name, action, scope, nodeIp, hard }) => {
+    async ({ name, action, scope, nodeIp, hard }, config) => {
       try {
         const session = currentSession(requireOwnerWif(config));
         const target = nodeIp ?? (await appLocations(api(config), name))[0]?.ip;
@@ -969,7 +1041,7 @@ export function createServer(config: Config): McpServer {
     },
   );
 
-  server.registerTool(
+  tool(
     'flux_cancel_app',
     {
       title: 'Cancel an app (stop it and stop paying)',
@@ -978,7 +1050,7 @@ export function createServer(config: Config): McpServer {
         'With confirm=true this signs and pays the (usually minimal) update; without it, returns the plan.',
       inputSchema: { name: z.string(), confirm: z.boolean().default(false) },
     },
-    async ({ name, confirm }) => {
+    async ({ name, confirm }, config) => {
       try {
         const existing = await publishedSpec(api(config), name);
         if (!existing) throw new Error(`${name} is not registered.`);
@@ -1015,7 +1087,7 @@ export function createServer(config: Config): McpServer {
 
   // ----- network ----------------------------------------------------------
 
-  server.registerTool(
+  tool(
     'flux_get_network_info',
     {
       title: 'Network overview',
@@ -1023,7 +1095,7 @@ export function createServer(config: Config): McpServer {
         'Node counts by tier, current block height, FLUX/USD rate and the deployment payment address.',
       inputSchema: {},
     },
-    async () => {
+    async (_args, config) => {
       try {
         const lb = api(config);
         const [count, info, deployment, rate] = await Promise.all([

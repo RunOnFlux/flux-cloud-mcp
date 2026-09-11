@@ -139,6 +139,36 @@ term. Private (enterprise) apps are supported through the `enterprise`
 argument: components are encrypted for the network and only ArcaneOS nodes
 can run them.
 
+## Hosted server: mcp.runonflux.com
+
+The same server also runs on Flux Cloud itself, over Streamable HTTP, for
+hosts that cannot start a local process (claude.ai connectors, ChatGPT,
+browser and mobile agents). Add it as a remote MCP server:
+
+```
+https://mcp.runonflux.com/mcp
+```
+
+The hosted server holds no keys. Read-only tools need none. Tools that sign
+or pay take `fluxIdPrivateKey` and `paymentPrivateKey` as call arguments,
+used in memory for that call and never logged or stored. The server's
+instructions tell agents to create a dedicated pair with `flux_generate_keys`
+and to have the user fund only what a deployment needs, rather than asking
+for the keys of a wallet used elsewhere. Anything typed into a chat passes
+through the AI vendor and the host's history, so treat such a pair as
+disposable and keep its balance small. For larger budgets, run the local
+server, where keys never leave your machine.
+
+Run your own copy with Docker:
+
+```bash
+docker run -p 3000:3000 runonflux/flux-cloud-mcp
+```
+
+It is stateless, so any number of instances can sit behind one load balancer.
+`GET /healthz` reports liveness. The Flux app specification that runs the
+public instance is in `deploy/cloudmcp.json`.
+
 ## Configuration
 
 | Variable                   | Default                                            | Purpose                                       |

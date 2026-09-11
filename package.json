@@ -1,11 +1,12 @@
 {
   "name": "@runonflux/flux-cloud-mcp",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "MCP server for Flux Cloud. Lets any AI agent quote, deploy, pay for, inspect and manage apps on the Flux decentralized cloud, priced in USD.",
   "license": "MIT",
   "type": "module",
   "bin": {
-    "flux-cloud-mcp": "dist/index.js"
+    "flux-cloud-mcp": "dist/index.js",
+    "flux-cloud-mcp-http": "dist/http.js"
   },
   "main": "dist/server.js",
   "types": "dist/server.d.ts",
@@ -27,7 +28,9 @@
     "test:live": "FLUX_LIVE_TESTS=1 node --test --import tsx test/live/*.test.ts",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "prepublishOnly": "yarn type-check && yarn lint && yarn format:check && yarn build && yarn test"
+    "prepublishOnly": "yarn type-check && yarn lint && yarn format:check && yarn build && yarn test",
+    "start:http": "node dist/http.js",
+    "docker:build": "docker build --platform linux/amd64 -t runonflux/flux-cloud-mcp:$npm_package_version -t runonflux/flux-cloud-mcp:latest ."
   },
   "keywords": [
     "flux",
@@ -41,7 +44,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/RunOnFlux/flux-cloud-mcp"
+    "url": "git+https://github.com/RunOnFlux/flux-cloud-mcp.git"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
