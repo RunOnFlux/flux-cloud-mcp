@@ -104,16 +104,38 @@ export async function appLocations(client: FluxClient, name: string): Promise<Lo
 }
 
 /**
- * Pick a node that can take the registration: enough peers, ArcaneOS when
- * the spec is enterprise, and honouring a pinned FLUX_NODE_URL.
+ * Where to send a registration. The load balancer at FLUX_API_URL comes
+ * first: sessions are self-signed and valid on every node, so no affinity is
+ * needed and it is the most reliable front door. If it refuses, a few healthy
+ * nodes from the deterministic list are probed and tried in turn. Enterprise
+ * specs skip the balancer, since only ArcaneOS nodes can decrypt them. A
+ * pinned FLUX_NODE_URL is used alone.
  */
-export async function selectNode(
+export async function selectNodes(
   config: Config,
-  { arcane = false, log = () => {} }: { arcane?: boolean; log?: (m: string) => void } = {},
-): Promise<FluxClient> {
-  if (config.nodeUrl) return new FluxClient(config.nodeUrl, config.requestTimeoutMs);
-  const [node] = await findHealthyNodes(api(config), 1, { arcane, log });
-  return (node as HealthyNode).client;
+  {
+    arcane = false,
+    count = 3,
+    log = () => {},
+  }: { arcane?: boolean; count?: number; log?: (m: string) => void } = {},
+): Promise<Array<() => Promise<FluxClient[]>>> {
+  if (config.nodeUrl) {
+    return [async () => [new FluxClient(config.nodeUrl as string, config.requestTimeoutMs)]];
+  }
+  const probe = async () => {
+    const nodes = await findHealthyNodes(api(config), count, { arcane, log });
+    return nodes.map((node: HealthyNode) => node.client);
+  };
+  if (arcane) return [probe];
+  return [async () => [api(config)], probe];
+}
+
+/** Whether an error means "this node cannot serve right now" rather than "the request is wrong". */
+function isNodeSideFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Unavailable|still reconciling|ECONNRESET|ECONNREFUSED|timeout|timed out|HTTP 5\d\d|fetch failed/i.test(
+    message,
+  );
 }
 
 export interface EnterpriseInput {
@@ -159,9 +181,9 @@ export async function plan(
   );
   if (errors.length) throw new Error(`Specification is not valid:\n- ${errors.join('\n- ')}`);
 
-  const [previous, node] = await Promise.all([
+  const [previous, nodeSources] = await Promise.all([
     publishedSpec(lb, spec.name),
-    selectNode(config, { arcane: isEnterprise, log }),
+    selectNodes(config, { arcane: isEnterprise, log }),
   ]);
   const action = previous ? 'update' : 'register';
   if (previous && previous.owner !== wallet.owner.zelid) {
@@ -170,19 +192,46 @@ export async function plan(
     );
   }
 
-  let candidate = spec;
-  if (options.enterprise) {
-    const session = currentSession(wallet.owner.wif);
-    candidate = await encryptEnterprise(node, session, spec, options.enterprise);
-    log('enterprise components encrypted for the network');
-  }
-
   const verifyPath =
     action === 'update'
       ? '/apps/verifyappupdatespecifications'
       : '/apps/verifyappregistrationspecifications';
-  const formatted = await node.post<AppSpec>(verifyPath, candidate, { timeoutMs: 120000 });
-  log(`node validated the specification (${action})`);
+
+  // Try the balancer, then probed nodes; a validation error is final, a
+  // node-side failure moves on to the next candidate.
+  let node: FluxClient | undefined;
+  let candidate = spec;
+  let formatted: AppSpec | undefined;
+  let lastError: unknown;
+  for (const source of nodeSources) {
+    if (node) break;
+    for (const attempt of await source()) {
+      try {
+        let toVerify = spec;
+        if (options.enterprise) {
+          const session = currentSession(wallet.owner.wif);
+          toVerify = await encryptEnterprise(attempt, session, spec, options.enterprise);
+        }
+        formatted = await attempt.post<AppSpec>(verifyPath, toVerify, { timeoutMs: 120000 });
+        candidate = toVerify;
+        node = attempt;
+        break;
+      } catch (error) {
+        lastError = error;
+        if (!isNodeSideFailure(error)) throw error;
+        log(
+          `${attempt.baseUrl} could not verify (${(error as Error).message}), trying another node`,
+        );
+      }
+    }
+  }
+  if (!node || !formatted) {
+    throw new Error(
+      `No node could verify the specification: ${lastError instanceof Error ? lastError.message : String(lastError)}. Try again in a minute.`,
+    );
+  }
+  if (options.enterprise) log('enterprise components encrypted for the network');
+  log(`node ${node.baseUrl} validated the specification (${action})`);
 
   const [quote, deployment, info, balance] = await Promise.all([
     quoteFromNetwork(lb, candidate),

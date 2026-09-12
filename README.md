@@ -121,11 +121,12 @@ flux_wait_for_app      -> accepted at height 2941560, 3/3 instances running
 
 ## How a deployment works
 
-1. The spec is verified by a FluxOS node exactly as it will be at
-   registration (image reachable, architecture, ports, name free).
+1. The spec is verified through `api.runonflux.io` exactly as it will be at
+   registration (image reachable, architecture, ports, name free). If the
+   balancer refuses, a few healthy nodes are probed and tried in turn.
 2. The network quotes the USD price; the server checks the payer's balance.
-3. With `confirm=true` the Flux ID signs the spec, one node broadcasts it to
-   the network and returns a 64-character message hash.
+3. With `confirm=true` the Flux ID signs the spec, the same endpoint
+   broadcasts it to the network and returns a 64-character message hash.
 4. The payment address sends the quoted FLUX to the network deployment
    address with the hash in an OP_RETURN output. Right before signing, the
    amount is re-checked against a freshly fetched price table, because an
