@@ -147,7 +147,7 @@ hosts that cannot start a local process (claude.ai connectors, ChatGPT,
 browser and mobile agents). Add it as a remote MCP server:
 
 ```
-https://mcp.runonflux.com/mcp
+https://mcp.runonflux.com/mcp   (also https://mcp.runonflux.io/mcp)
 ```
 
 The hosted server holds no keys. Read-only tools need none. Tools that sign

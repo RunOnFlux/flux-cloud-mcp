@@ -9,7 +9,7 @@
       "description": "Streamable HTTP MCP endpoint at /mcp, stateless, holds no keys. Installs the npm package on start.",
       "repotag": "node:22-bookworm-slim",
       "ports": [35127],
-      "domains": ["mcp.runonflux.com"],
+      "domains": ["mcp.runonflux.com,mcp.runonflux.io"],
       "environmentParameters": ["PORT=3000"],
       "commands": [
         "sh",
