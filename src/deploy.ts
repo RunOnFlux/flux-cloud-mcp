@@ -396,7 +396,8 @@ export async function waitForApp(
     if (accepted) instances = await appLocations(lb, name);
     const wanted = accepted?.instances ?? 0;
     const done = Boolean(accepted) && instances.length >= wanted;
-    if (done || Date.now() >= deadline) {
+    const remaining = deadline - Date.now();
+    if (done || remaining <= 1000) {
       return {
         accepted,
         paymentConfirmations: confirmations,
@@ -406,6 +407,6 @@ export async function waitForApp(
         timedOut: !done,
       };
     }
-    await sleep(pollMs);
+    await sleep(Math.min(pollMs, remaining));
   }
 }

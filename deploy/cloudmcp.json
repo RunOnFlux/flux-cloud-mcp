@@ -14,7 +14,7 @@
       "commands": [
         "sh",
         "-c",
-        "npm install -g --no-fund --no-audit @runonflux/flux-cloud-mcp@0.2.2 && exec flux-cloud-mcp-http"
+        "npm install -g --no-fund --no-audit @runonflux/flux-cloud-mcp@0.2.3 && exec flux-cloud-mcp-http"
       ],
       "containerPorts": [3000],
       "containerData": "/data",
