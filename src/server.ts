@@ -298,7 +298,7 @@ function probeTcp(host: string, port: number, timeoutMs = 5000): Promise<boolean
 async function gatewayStatus(
   appName: string,
 ): Promise<{ node: string | null; state: string; detail: string }> {
-  let node: string | null = null;
+  let node: string | null;
   try {
     const cnames = await resolveCname(`${appName.toLowerCase()}.app.runonflux.io`);
     node = cnames.find((c) => c.startsWith('fdm-')) ?? cnames[0] ?? null;
