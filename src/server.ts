@@ -5,6 +5,7 @@
  * minimum is never surfaced as a quote.
  */
 
+import { resolveCname } from 'node:dns/promises';
 import { createConnection } from 'node:net';
 import { McpServer, type ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -46,7 +47,7 @@ import {
 } from './spec.js';
 
 export const SERVER_NAME = 'flux-cloud';
-export const SERVER_VERSION = '0.2.5';
+export const SERVER_VERSION = '0.2.6';
 
 // ---------------------------------------------------------------------------
 // Schemas shared by several tools
@@ -289,6 +290,67 @@ function probeTcp(host: string, port: number, timeoutMs = 5000): Promise<boolean
   });
 }
 
+/**
+ * The domain gateway shards apps across fdm-lb-* nodes; the app's CNAME says
+ * which one. That node's API (port 16130) says whether it has the app in its
+ * configuration, has not picked it up yet, or is not operational at all.
+ */
+async function gatewayStatus(
+  appName: string,
+): Promise<{ node: string | null; state: string; detail: string }> {
+  let node: string | null = null;
+  try {
+    const cnames = await resolveCname(`${appName.toLowerCase()}.app.runonflux.io`);
+    node = cnames.find((c) => c.startsWith('fdm-')) ?? cnames[0] ?? null;
+  } catch {
+    return { node: null, state: 'no-dns', detail: 'no DNS record yet for the shared domain' };
+  }
+  if (!node)
+    return {
+      node: null,
+      state: 'no-dns',
+      detail: 'shared domain does not point at a gateway node',
+    };
+  try {
+    const response = await fetch(`http://${node}:16130/appips/${encodeURIComponent(appName)}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    const payload = (await response.json()) as {
+      status: string;
+      data: { message?: string; ips?: string[] };
+    };
+    if (payload.status === 'success') {
+      return {
+        node,
+        state: 'configured',
+        detail: `gateway ${node} routes to ${payload.data.ips?.length ?? 0} instance(s)`,
+      };
+    }
+    const message = payload.data?.message ?? '';
+    if (/starting up/i.test(message)) {
+      return {
+        node,
+        state: 'gateway-not-operational',
+        detail: `gateway ${node} reports it has not completed its initial processing; apps assigned to it get no backend until the Flux team fixes that node`,
+      };
+    }
+    if (/not found/i.test(message)) {
+      return {
+        node,
+        state: 'not-configured',
+        detail: `gateway ${node} has not added this app yet (new apps take a few minutes; if instances have run for longer, the gateway is lagging)`,
+      };
+    }
+    return { node, state: 'error', detail: `gateway ${node}: ${message}` };
+  } catch (error) {
+    return {
+      node,
+      state: 'unreachable',
+      detail: `gateway ${node} API did not answer (${(error as Error).message})`,
+    };
+  }
+}
+
 interface DirectProbe {
   host: string;
   port: number;
@@ -315,8 +377,9 @@ async function reachability(
       : componentsOf(spec).flatMap((c) => c.ports);
   const hosts = locations.map((l) => l.ip.split(':')[0] ?? l.ip);
   const domainUrl = `https://${lower}.app.runonflux.io/`;
-  const [domain, direct] = await Promise.all([
+  const [domain, gateway, direct] = await Promise.all([
     probeHttp(domainUrl),
+    gatewayStatus(spec.name),
     Promise.all(
       hosts.flatMap((host) =>
         ports.map(async (port): Promise<DirectProbe> => {
@@ -334,9 +397,13 @@ async function reachability(
   const findings: string[] = [];
   const isPrivate = Boolean(spec.enterprise) && !(explicitPorts && explicitPorts.length);
 
-  if (domain.status === 503) {
+  if (domain.status === 503 && gateway.state !== 'configured') {
     findings.push(
-      'Shared domain answers 503: the domain gateway found no instance accepting TCP connections on the app port. The gateway only serves HTTP over TCP, so this is a fault only if the app is meant to be a web service on that port.',
+      `Shared domain answers 503 because the gateway does not route this app: ${gateway.detail}.`,
+    );
+  } else if (domain.status === 503) {
+    findings.push(
+      `Shared domain answers 503 although ${gateway.detail}: no instance accepts TCP connections on the app port. The gateway only serves HTTP over TCP, so this is a fault only if the app is meant to be a web service on that port.`,
     );
   } else if (domain.status === null && tcpOk > 0 && httpOk === 0) {
     findings.push(
@@ -373,6 +440,7 @@ async function reachability(
   }
   return {
     domain: { url: domainUrl, status: domain.status, error: domain.error },
+    gateway,
     direct,
     findings,
   };
