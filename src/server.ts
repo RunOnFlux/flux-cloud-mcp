@@ -18,11 +18,13 @@ import {
   explorer,
   plan,
   publishedSpec,
+  selectNodes,
   waitForApp,
   walletFromConfig,
   type EnterpriseInput,
 } from './deploy.js';
 import { GOTCHAS, OVERVIEW, PRICING, SPEC_FORMAT } from './docs.js';
+import { fetchPrivateSpec, sanitizeComponent } from './enterprise.js';
 import { FluxClient, instanceEndpoint } from './fluxapi.js';
 import { currentSession, generateIdentity, identityFromWif } from './keys.js';
 import {
@@ -47,7 +49,7 @@ import {
 } from './spec.js';
 
 export const SERVER_NAME = 'flux-cloud';
-export const SERVER_VERSION = '0.2.6';
+export const SERVER_VERSION = '0.2.7';
 
 // ---------------------------------------------------------------------------
 // Schemas shared by several tools
@@ -585,31 +587,94 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
   );
 
   /**
+   * Components of an app as far as the caller may see them. Public apps: the
+   * published compose. Private apps: the public spec has compose [], so with
+   * the owner key configured the decrypted spec is fetched from an ArcaneOS
+   * node (owner-authenticated) and cached per spec hash. Secrets (env,
+   * commands, repoauth) never leave this function; only sanitized fields do.
+   */
+  const privateCache = new Map<string, { hash: string; compose: AppComponent[] }>();
+  async function componentsFor(
+    config: Config,
+    spec: PublishedAppSpec,
+  ): Promise<{
+    compose: AppComponent[];
+    source: 'public' | 'private' | 'unavailable';
+    note?: string;
+  }> {
+    if (!spec.enterprise) return { compose: componentsOf(spec), source: 'public' };
+    const cached = privateCache.get(spec.name);
+    if (cached && cached.hash === spec.hash) return { compose: cached.compose, source: 'private' };
+    if (!config.ownerWif) {
+      return {
+        compose: [],
+        source: 'unavailable',
+        note: 'Private app: component details are encrypted. Configure or pass the owner key to read them.',
+      };
+    }
+    const owner = identityFromWif(config.ownerWif);
+    if (owner.zelid !== spec.owner) {
+      return {
+        compose: [],
+        source: 'unavailable',
+        note: `Private app owned by ${spec.owner}; the configured key is ${owner.zelid}, which cannot decrypt it.`,
+      };
+    }
+    const session = currentSession(config.ownerWif);
+    let lastError: unknown;
+    for (const source of await selectNodes(config, { arcane: true, count: 3 })) {
+      for (const node of await source()) {
+        try {
+          const content = await fetchPrivateSpec(node, session, spec.owner, spec.name);
+          privateCache.set(spec.name, { hash: spec.hash, compose: content.compose });
+          return { compose: content.compose, source: 'private' };
+        } catch (error) {
+          lastError = error;
+        }
+      }
+    }
+    return {
+      compose: [],
+      source: 'unavailable',
+      note: `Could not decrypt the private spec: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
+    };
+  }
+
+  /**
    * FluxOS names the container of a compose app `<component>_<app>`; legacy
-   * single-container apps are just `<app>`. Pick a running node when none is given.
+   * single-container apps are just `<app>`. Pick a running node when none is
+   * given, and the only component when the app has one.
    */
   async function resolveContainer(
+    config: Config,
     name: string,
     component: string | undefined,
     nodeIp: string | undefined,
-  ): Promise<{ target: string; container: string }> {
+  ): Promise<{ target: string; container: string; components: string[] }> {
     const lb = api(baseConfig);
     const [spec, locations] = await Promise.all([publishedSpec(lb, name), appLocations(lb, name)]);
     if (!spec) throw new Error(`${name} is not registered on the network.`);
     const target = nodeIp ?? locations[0]?.ip;
     if (!target) throw new Error(`${name} has no running instance.`);
-    const components = componentsOf(spec);
-    let container = name;
-    if (Array.isArray(spec.compose)) {
-      const chosen = component ?? (components.length === 1 ? components[0]?.name : undefined);
-      if (!chosen) {
+    if (!Array.isArray(spec.compose)) return { target, container: name, components: [] };
+    const discovered = await componentsFor(config, spec);
+    const names = discovered.compose.map((c) => c.name);
+    let chosen = component;
+    if (!chosen) {
+      if (names.length === 1) [chosen] = names;
+      else if (names.length > 1) {
         throw new Error(
-          `${name} has ${components.length} components; pass component (one of ${components.map((c) => c.name).join(', ')}).`,
+          `${name} has ${names.length} components; pass component (one of ${names.join(', ')}).`,
+        );
+      } else {
+        throw new Error(
+          `${name}: component names are not available (${discovered.note ?? 'no compose'}). Pass component explicitly.`,
         );
       }
-      container = `${chosen}_${name}`;
+    } else if (names.length && !names.includes(chosen)) {
+      throw new Error(`${name} has no component "${chosen}" (available: ${names.join(', ')}).`);
     }
-    return { target, container };
+    return { target, container: `${chosen}_${name}`, components: names };
   }
 
   // ----- identity ---------------------------------------------------------
@@ -1066,9 +1131,19 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
           return ok({ found: false, name, message: `${name} is not registered on the network.` });
         const expiresAt = spec.height + expireOf(spec);
         const blocksLeft = expiresAt - info.blocks;
+        const discovered = await componentsFor(config, spec);
+        const summary = summarizeSpec(spec);
+        if (discovered.source === 'private') {
+          summary.components = discovered.compose.map(sanitizeComponent);
+        }
         return ok({
           found: true,
-          summary: summarizeSpec(spec),
+          summary,
+          components: {
+            source: discovered.source,
+            names: discovered.compose.map((c) => c.name),
+            ...(discovered.note ? { note: discovered.note } : {}),
+          },
           registeredAtHeight: spec.height,
           expiresAtHeight: expiresAt,
           blocksLeft,
@@ -1080,7 +1155,14 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
             nodes: locations.map((l) => ({ ip: l.ip, since: l.runningSince ?? null })),
           },
           urls: urlsFor(spec, locations),
-          reachability: await reachability(spec, locations, ports),
+          reachability: await reachability(
+            spec,
+            locations,
+            ports ??
+              (discovered.source === 'private'
+                ? discovered.compose.flatMap((c) => c.ports)
+                : undefined),
+          ),
           spec,
         });
       } catch (error) {
@@ -1144,7 +1226,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     {
       title: 'Read container logs from a running instance',
       description:
-        'Fetches the last N log lines of an app (or one component of it) from one of the nodes running it. Requires the owner key.',
+        'Fetches the last N log lines of an app from one of the nodes running it. Requires the owner key. The component is picked automatically when the app has one (private apps are decrypted with the owner key); otherwise the available names are listed.',
       inputSchema: {
         name: z.string(),
         component: z.string().optional().describe('Component name for multi-component apps.'),
@@ -1158,13 +1240,18 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     async ({ name, component, lines, nodeIp }, config) => {
       try {
         const session = currentSession(requireOwnerWif(config));
-        const { target, container } = await resolveContainer(name, component, nodeIp);
+        const { target, container, components } = await resolveContainer(
+          config,
+          name,
+          component,
+          nodeIp,
+        );
         const node = new FluxClient(instanceEndpoint(target), config.requestTimeoutMs);
         const logs = await node.get<string[] | string>(`/apps/applog/${container}/${lines}`, {
           session,
           timeoutMs: 60000,
         });
-        return ok({ node: target, container, logs });
+        return ok({ node: target, container, components, logs });
       } catch (error) {
         return fail(error);
       }
@@ -1186,13 +1273,18 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     async ({ name, component, nodeIp }, config) => {
       try {
         const session = currentSession(requireOwnerWif(config));
-        const { target, container } = await resolveContainer(name, component, nodeIp);
+        const { target, container, components } = await resolveContainer(
+          config,
+          name,
+          component,
+          nodeIp,
+        );
         const node = new FluxClient(instanceEndpoint(target), config.requestTimeoutMs);
         const stats = await node.get<unknown>(`/apps/appstats/${container}`, {
           session,
           timeoutMs: 60000,
         });
-        return ok({ node: target, container, stats });
+        return ok({ node: target, container, components, stats });
       } catch (error) {
         return fail(error);
       }

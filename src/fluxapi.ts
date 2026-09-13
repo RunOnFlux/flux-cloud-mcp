@@ -58,6 +58,7 @@ export function sessionHeader(session: Session): string {
 export interface RequestOptions {
   body?: unknown;
   session?: Session | undefined;
+  headers?: Record<string, string> | undefined;
   timeoutMs?: number;
 }
 
@@ -79,6 +80,7 @@ export class FluxClient {
       body = typeof options.body === 'string' ? options.body : JSON.stringify(options.body);
     }
     if (options.session) headers.zelidauth = sessionHeader(options.session);
+    Object.assign(headers, options.headers ?? {});
 
     const url = `${this.baseUrl}${pathname}`;
     let response: Response;

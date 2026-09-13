@@ -82,23 +82,23 @@ Keys are optional. Without them every read-only tool works, and
 
 ## Tools
 
-| Tool                    | What it does                                                             | Spends FLUX    |
-| ----------------------- | ------------------------------------------------------------------------ | -------------- |
-| `flux_get_identity`     | Flux ID, payment address, balance in FLUX and USD                        | no             |
-| `flux_generate_keys`    | New Flux ID + payment key pair with setup instructions                   | no             |
-| `flux_get_pricing`      | USD rate card, FLUX/USD rate, discounts, reference sizes                 | no             |
-| `flux_build_spec`       | Simple description (image, ports, cpu/ram/hdd, months) to a full v8 spec | no             |
-| `flux_validate_spec`    | Local rules plus verification on a FluxOS node                           | no             |
-| `flux_quote_app`        | USD price and FLUX to pay, for a registration or an update               | no             |
-| `flux_deploy_app`       | Plan (default) or, with `confirm=true`, sign, broadcast and pay          | with `confirm` |
-| `flux_wait_for_app`     | Poll until accepted and instances run; returns URLs                      | no             |
-| `flux_get_app`          | Any app's spec, expiry, instances, URLs                                  | no             |
-| `flux_list_my_apps`     | Apps owned by the Flux ID, with instance counts and days left            | no             |
-| `flux_get_app_logs`     | Container logs from a running instance (owner only)                      | no             |
-| `flux_get_app_stats`    | Live CPU/memory/network of an instance (owner only)                      | no             |
-| `flux_control_app`      | Restart, redeploy or remove instances, per node or globally              | no             |
-| `flux_cancel_app`       | End an app early by shortening its term                                  | with `confirm` |
-| `flux_get_network_info` | Node counts, height, FLUX/USD, deployment address                        | no             |
+| Tool                    | What it does                                                                                                            | Spends FLUX    |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------- | -------------- |
+| `flux_get_identity`     | Flux ID, payment address, balance in FLUX and USD                                                                       | no             |
+| `flux_generate_keys`    | New Flux ID + payment key pair with setup instructions                                                                  | no             |
+| `flux_get_pricing`      | USD rate card, FLUX/USD rate, discounts, reference sizes                                                                | no             |
+| `flux_build_spec`       | Simple description (image, ports, cpu/ram/hdd, months) to a full v8 spec                                                | no             |
+| `flux_validate_spec`    | Local rules plus verification on a FluxOS node                                                                          | no             |
+| `flux_quote_app`        | USD price and FLUX to pay, for a registration or an update                                                              | no             |
+| `flux_deploy_app`       | Plan (default) or, with `confirm=true`, sign, broadcast and pay                                                         | with `confirm` |
+| `flux_wait_for_app`     | Poll until accepted and instances run; returns URLs                                                                     | no             |
+| `flux_get_app`          | Any app's spec, expiry, instances, URLs                                                                                 | no             |
+| `flux_list_my_apps`     | Apps owned by the Flux ID, with instance counts and days left                                                           | no             |
+| `flux_get_app_logs`     | Container logs from a running instance (owner only); component auto-selected, private apps decrypted with the owner key | no             |
+| `flux_get_app_stats`    | Live CPU/memory/network of an instance (owner only)                                                                     | no             |
+| `flux_control_app`      | Restart, redeploy or remove instances, per node or globally                                                             | no             |
+| `flux_cancel_app`       | End an app early by shortening its term                                                                                 | with `confirm` |
+| `flux_get_network_info` | Node counts, height, FLUX/USD, deployment address                                                                       | no             |
 
 Resources `flux://guide/overview`, `flux://guide/spec-format`,
 `flux://guide/pricing` and `flux://guide/gotchas` give the agent the domain
@@ -133,6 +133,12 @@ flux_wait_for_app      -> accepted at height 2941560, 3/3 instances running
    underpaid message is dropped silently and the FLUX is not refunded.
 5. Nodes pair the confirmed payment with the message and publish the app.
    Instances then spawn and pull the image.
+
+Private (enterprise) apps publish an empty component list, so `flux_get_app`,
+`flux_get_app_logs` and `flux_get_app_stats` fetch the decrypted specification
+from an ArcaneOS node with the owner key when it is configured or passed. Only
+component names, images, ports and sizes are returned; environment variables,
+commands and registry credentials never leave the server.
 
 Updates use the same tool: an existing app of the same owner gets a
 `fluxappupdate` message and the network credits the unused part of the old
