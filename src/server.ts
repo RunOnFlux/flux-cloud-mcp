@@ -5,6 +5,7 @@
  * minimum is never surfaced as a quote.
  */
 
+import { createConnection } from 'node:net';
 import { McpServer, type ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { Config } from './config.js';
@@ -45,7 +46,7 @@ import {
 } from './spec.js';
 
 export const SERVER_NAME = 'flux-cloud';
-export const SERVER_VERSION = '0.2.4';
+export const SERVER_VERSION = '0.2.5';
 
 // ---------------------------------------------------------------------------
 // Schemas shared by several tools
@@ -254,6 +255,127 @@ function urlsFor(spec: PublishedAppSpec | AppSpec, locations: Array<{ ip: string
     return components.flatMap((c) => c.ports.map((p) => `http://${host}:${p}`));
   });
   return { shared, direct };
+}
+
+/** HTTP probe with a short timeout; never throws. */
+async function probeHttp(
+  url: string,
+  timeoutMs = 6000,
+): Promise<{ status: number | null; error: string | null }> {
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return { status: response.status, error: null };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: null, error: /abort|timeout/i.test(message) ? 'timeout' : 'no http response' };
+  }
+}
+
+/** Raw TCP connect, which is exactly what the domain gateway's health check does. */
+function probeTcp(host: string, port: number, timeoutMs = 5000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = createConnection({ host, port });
+    const done = (ok: boolean) => {
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
+}
+
+interface DirectProbe {
+  host: string;
+  port: number;
+  tcp: boolean;
+  http: number | null;
+}
+
+/**
+ * What the probes mean, stated carefully: the shared *.app.runonflux.io
+ * domain only serves HTTP over TCP, and answers 503 when no instance accepts a
+ * TCP connection on the app port. That is a fault only if the app is meant to
+ * be a web service on that port; a UDP game server, a worker with no
+ * listener, or a service on another port is healthy and still shows 503.
+ */
+async function reachability(
+  spec: PublishedAppSpec | AppSpec,
+  locations: Array<{ ip: string }>,
+  explicitPorts?: number[],
+) {
+  const lower = spec.name.toLowerCase();
+  const ports =
+    explicitPorts && explicitPorts.length
+      ? explicitPorts
+      : componentsOf(spec).flatMap((c) => c.ports);
+  const hosts = locations.map((l) => l.ip.split(':')[0] ?? l.ip);
+  const domainUrl = `https://${lower}.app.runonflux.io/`;
+  const [domain, direct] = await Promise.all([
+    probeHttp(domainUrl),
+    Promise.all(
+      hosts.flatMap((host) =>
+        ports.map(async (port): Promise<DirectProbe> => {
+          const [tcp, http] = await Promise.all([
+            probeTcp(host, port),
+            probeHttp(`http://${host}:${port}/`),
+          ]);
+          return { host, port, tcp, http: http.status };
+        }),
+      ),
+    ),
+  ]);
+  const tcpOk = direct.filter((d) => d.tcp).length;
+  const httpOk = direct.filter((d) => d.http !== null).length;
+  const findings: string[] = [];
+  const isPrivate = Boolean(spec.enterprise) && !(explicitPorts && explicitPorts.length);
+
+  if (domain.status === 503) {
+    findings.push(
+      'Shared domain answers 503: the domain gateway found no instance accepting TCP connections on the app port. The gateway only serves HTTP over TCP, so this is a fault only if the app is meant to be a web service on that port.',
+    );
+  } else if (domain.status === null && tcpOk > 0 && httpOk === 0) {
+    findings.push(
+      'Shared domain connects but the service behind it is not HTTP, so browsers cannot use it; clients should use ip:port.',
+    );
+  } else if (domain.status === null) {
+    findings.push(
+      `Shared domain did not answer (${domain.error}). A newly accepted app gets its domain within a few minutes.`,
+    );
+  } else {
+    findings.push(`Shared domain answers HTTP ${domain.status}.`);
+  }
+
+  if (isPrivate) {
+    findings.push(
+      'Private (enterprise) app: its ports are encrypted, so pass `ports` to probe the instances directly.',
+    );
+  } else if (!ports.length) {
+    findings.push('The app exposes no ports, so it is not reachable from outside by design.');
+  } else if (!hosts.length) {
+    findings.push('No running instance to probe yet.');
+  } else if (tcpOk === 0) {
+    findings.push(
+      `Nothing accepts TCP connections on port(s) ${ports.join(', ')} on any of ${hosts.length} instance(s). If the app should serve on that port: check the process listens on containerPort and binds 0.0.0.0 (not 127.0.0.1); flux_get_app_logs shows what it bound. If the app is UDP-only or has no listener, this is expected.`,
+    );
+  } else if (httpOk === 0) {
+    findings.push(
+      `Instances accept TCP on port(s) ${ports.join(', ')} but do not speak HTTP there. The app is up; use ip:port directly, the shared domain cannot serve non-HTTP protocols.`,
+    );
+  } else {
+    findings.push(
+      `${httpOk}/${direct.length} direct probes answered HTTP; the app serves HTTP on its port.`,
+    );
+  }
+  return {
+    domain: { url: domainUrl, status: domain.status, error: domain.error },
+    direct,
+    findings,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -852,10 +974,19 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     {
       title: 'Get a deployed app: spec, status, instances, URLs',
       description:
-        'Looks up any app on the network by name and returns its published specification, expiry, running instances and URLs.',
-      inputSchema: { name: z.string() },
+        'Looks up any app on the network by name and returns its published specification, expiry, running instances, URLs ' +
+        'and a reachability check: probes the shared domain (HTTP) and each instance port (TCP and HTTP) and explains what a 503 means, including when it is expected for non-web apps.',
+      inputSchema: {
+        name: z.string(),
+        ports: z
+          .array(z.number().int())
+          .optional()
+          .describe(
+            'Ports to probe on instances; needed for private apps whose ports are encrypted.',
+          ),
+      },
     },
-    async ({ name }, config) => {
+    async ({ name, ports }, config) => {
       try {
         const lb = api(config);
         const [spec, locations, info] = await Promise.all([
@@ -881,6 +1012,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
             nodes: locations.map((l) => ({ ip: l.ip, since: l.runningSince ?? null })),
           },
           urls: urlsFor(spec, locations),
+          reachability: await reachability(spec, locations, ports),
           spec,
         });
       } catch (error) {

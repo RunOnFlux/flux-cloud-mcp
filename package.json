@@ -1,6 +1,6 @@
 {
   "name": "@runonflux/flux-cloud-mcp",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "MCP server for Flux Cloud. Lets any AI agent quote, deploy, pay for, inspect and manage apps on the Flux decentralized cloud, priced in USD.",
   "license": "MIT",
   "type": "module",
