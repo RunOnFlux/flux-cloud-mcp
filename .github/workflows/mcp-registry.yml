@@ -1,11 +1,15 @@
 name: Publish to MCP Registry
 
-# Publishes server.json to the official MCP Registry on version tags, after
-# the npm package for that version has been published. Authenticates with
-# GitHub OIDC, so no secret is needed; the namespace is io.github.runonflux.
+# Publishes server.json to the official MCP Registry, after the npm package for
+# that version is live. Authenticates with GitHub OIDC, so no secret is needed;
+# the namespace is io.github.runonflux.
+#
+# Run by hand (Actions > Publish to MCP Registry > Run workflow, "Use workflow
+# from" the release tag vX.Y.Z) once the staged npm version is approved. It no
+# longer runs on tag pushes: publish.yml only stages the npm version, which
+# stays invisible until a maintainer approves it on npmjs.com, so a tag-triggered
+# run would time out in the wait below and fail before publishing anything.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 
 jobs:
