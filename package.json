@@ -47,7 +47,7 @@
     "url": "git+https://github.com/RunOnFlux/flux-cloud-mcp.git"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@runonflux/utxo-lib": "1.0.5",
     "bitcoinjs-message": "2.2.0",
     "zod": "4.6.2"
