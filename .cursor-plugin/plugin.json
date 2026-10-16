@@ -1,0 +1,32 @@
+{
+  "name": "flux-cloud",
+  "displayName": "Flux Cloud",
+  "version": "0.2.8",
+  "description": "Deploy, pay for and manage apps on Flux Cloud, the decentralized cloud. Prices in USD.",
+  "author": {
+    "name": "Flux"
+  },
+  "publisher": "Flux",
+  "homepage": "https://runonflux.com",
+  "repository": "https://github.com/RunOnFlux/flux-cloud-mcp",
+  "license": "MIT",
+  "logo": "assets/logo.png",
+  "keywords": [
+    "flux",
+    "runonflux",
+    "decentralized cloud",
+    "deploy",
+    "docker",
+    "hosting",
+    "crypto",
+    "mcp"
+  ],
+  "category": "integrations",
+  "tags": ["flux", "cloud", "deploy", "crypto", "mcp"],
+  "mcpServers": {
+    "flux-cloud": {
+      "type": "http",
+      "url": "https://mcp.runonflux.com/mcp"
+    }
+  }
+}

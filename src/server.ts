@@ -8,6 +8,7 @@
 import { resolveCname } from 'node:dns/promises';
 import { createConnection } from 'node:net';
 import { McpServer, type ToolCallback } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import type { Config } from './config.js';
 import { toFlux } from './chain.js';
@@ -49,7 +50,7 @@ import {
 } from './spec.js';
 
 export const SERVER_NAME = 'flux-cloud';
-export const SERVER_VERSION = '0.2.7';
+export const SERVER_VERSION = '0.2.8';
 
 // ---------------------------------------------------------------------------
 // Schemas shared by several tools
@@ -486,6 +487,19 @@ function withKeys(base: Config, args: KeyArgs): Config {
   };
 }
 
+/**
+ * Tool annotations, so hosts can tell lookups from calls that change apps or
+ * spend FLUX and ask the user before the latter.
+ */
+const READS_NETWORK: ToolAnnotations = { readOnlyHint: true, openWorldHint: true };
+const LOCAL_ONLY: ToolAnnotations = { readOnlyHint: true, openWorldHint: false };
+const CHANGES_APPS: ToolAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true,
+};
+
 const LOCAL_INSTRUCTIONS =
   'Deploy and manage apps on Flux Cloud, the decentralized cloud. Read the flux://guide/overview resource first. ' +
   'All prices are Flux Cloud USD prices (converted to FLUX for payment). Always show the user the USD quote from ' +
@@ -511,7 +525,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
    */
   function tool<S extends z.ZodRawShape>(
     name: string,
-    meta: { title: string; description: string; inputSchema: S },
+    meta: { title: string; annotations: ToolAnnotations; description: string; inputSchema: S },
     handler: (args: z.infer<z.ZodObject<S>>, config: Config) => Promise<ToolResult>,
   ): void {
     const inputSchema = (hosted ? { ...meta.inputSchema, ...KeysShape } : meta.inputSchema) as S;
@@ -683,6 +697,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_get_identity',
     {
       title: 'Show the configured Flux identity and balance',
+      annotations: READS_NETWORK,
       description:
         'Returns the Flux ID (app owner address), the payment address and its spendable FLUX balance with its USD value. ' +
         'Explains what to configure if keys are missing. Never returns private keys.',
@@ -736,6 +751,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_generate_keys',
     {
       title: 'Generate a new Flux ID and payment key pair',
+      annotations: LOCAL_ONLY,
       description:
         'Creates two fresh private keys (WIF): one for the Flux ID that will own apps, one for the address that pays. ' +
         'The response contains the secrets; store them in the MCP server environment as FLUX_ID_PRIVATE_KEY and ' +
@@ -770,6 +786,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_get_pricing',
     {
       title: 'Get the Flux Cloud rate card',
+      annotations: READS_NETWORK,
       description:
         'Returns the current USD rate card, the live FLUX/USD rate, the pay-in-FLUX discount and instant USD estimates for ' +
         'a few reference sizes. Use flux_quote_app for the exact price of a specific app.',
@@ -838,6 +855,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_build_spec',
     {
       title: 'Build a Flux app specification from a simple description',
+      annotations: LOCAL_ONLY,
       description:
         'Turns images, ports, resources and a term into a complete, correctly formatted v8 specification, with public ' +
         'ports auto-picked and data replication enabled. Returns the spec plus local validation errors and warnings.',
@@ -870,6 +888,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_validate_spec',
     {
       title: 'Validate a specification locally and on the network',
+      annotations: READS_NETWORK,
       description:
         'Runs the local rule checks, then asks a FluxOS node to verify the specification exactly as it would at registration ' +
         '(image reachable, architecture, ports, name availability). Returns the node-formatted spec on success.',
@@ -919,6 +938,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_quote_app',
     {
       title: 'Quote the price of an app in USD and FLUX',
+      annotations: READS_NETWORK,
       description:
         'Returns the Flux Cloud price for registering the given specification, or for updating it if an app of that name ' +
         'already exists (the unused part of the current term is credited). Price is in USD with the FLUX amount at market rate.',
@@ -961,6 +981,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_deploy_app',
     {
       title: 'Deploy (register or update) an app and pay for it',
+      annotations: CHANGES_APPS,
       description:
         'Validates the specification on a node, quotes it, and with confirm=true signs it with the Flux ID, broadcasts ' +
         'it and pays the quoted FLUX from the payment address. Without confirm it only returns the plan (price, balance, ' +
@@ -1052,6 +1073,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_wait_for_app',
     {
       title: 'Wait for a deployment to be accepted and its instances to run',
+      annotations: READS_NETWORK,
       description:
         'Polls the network for up to timeoutSeconds (default 45 to fit hosts with a 60 s tool timeout, max 600). Returns payment confirmations, whether the ' +
         'spec was accepted, and the running instances with URLs. Safe to call repeatedly until done=true.',
@@ -1106,6 +1128,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_get_app',
     {
       title: 'Get a deployed app: spec, status, instances, URLs',
+      annotations: READS_NETWORK,
       description:
         'Looks up any app on the network by name and returns its published specification, expiry, running instances, URLs ' +
         'and a reachability check: probes the shared domain (HTTP) and each instance port (TCP and HTTP) and explains what a 503 means, including when it is expected for non-web apps.',
@@ -1175,6 +1198,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_list_my_apps',
     {
       title: 'List apps owned by the configured Flux ID',
+      annotations: READS_NETWORK,
       description:
         'Lists every app registered by the owner (or a given Flux ID) with expiry and instance counts.',
       inputSchema: {
@@ -1225,6 +1249,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_get_app_logs',
     {
       title: 'Read container logs from a running instance',
+      annotations: READS_NETWORK,
       description:
         'Fetches the last N log lines of an app from one of the nodes running it. Requires the owner key. The component is picked automatically when the app has one (private apps are decrypted with the owner key); otherwise the available names are listed.',
       inputSchema: {
@@ -1262,6 +1287,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_get_app_stats',
     {
       title: 'Get live resource usage of a running instance',
+      annotations: READS_NETWORK,
       description:
         'CPU, memory and network stats of the containers of an app on one node. Requires the owner key.',
       inputSchema: {
@@ -1297,6 +1323,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_control_app',
     {
       title: 'Restart, redeploy or remove app instances',
+      annotations: CHANGES_APPS,
       description:
         'restart: restarts containers. redeploy: pulls the image again and recreates containers (hard=true also wipes data). ' +
         'remove: uninstalls from nodes; the registration stays and the network re-spawns it elsewhere, so use flux_cancel_app ' +
@@ -1337,6 +1364,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_cancel_app',
     {
       title: 'Cancel an app (stop it and stop paying)',
+      annotations: CHANGES_APPS,
       description:
         'Ends an app early by updating its term so it expires within about an hour. The network then uninstalls it everywhere. ' +
         'With confirm=true this signs and pays the (usually minimal) update; without it, returns the plan.',
@@ -1383,6 +1411,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     'flux_get_network_info',
     {
       title: 'Network overview',
+      annotations: READS_NETWORK,
       description:
         'Node counts by tier, current block height, FLUX/USD rate and the deployment payment address.',
       inputSchema: {},
