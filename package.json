@@ -50,7 +50,7 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@runonflux/utxo-lib": "1.0.5",
     "bitcoinjs-message": "2.2.0",
-    "zod": "4.6.2"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
