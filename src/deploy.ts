@@ -15,11 +15,12 @@
  * silently and the same hash cannot be paid twice.
  */
 
+import { createHash } from 'node:crypto';
 import type { Config } from './config.js';
 import { Explorer, buildPayment, selectSpendable, toFlux, SATOSHIS } from './chain.js';
-import { FluxClient, findHealthyNodes, type HealthyNode } from './fluxapi.js';
+import { FluxClient, findHealthyNodes, instanceEndpoint, type HealthyNode } from './fluxapi.js';
 import { currentSession, identityFromWif, signMessage, type Identity } from './keys.js';
-import { encryptEnterprise } from './enterprise.js';
+import { agreedAppPublicKey, encryptEnterprise } from './enterprise.js';
 import {
   consensusMinimumFlux,
   quoteFromNetwork,
@@ -104,6 +105,111 @@ export async function appLocations(client: FluxClient, name: string): Promise<Lo
 }
 
 /**
+ * The instance to send an owner-authenticated call to: the first running one,
+ * or the one the caller names, which must be in the app's own location list.
+ * The owner's session goes with the request, and on the hosted server so does
+ * a request from wherever it runs, so a free-form address would hand both to
+ * any host the caller picks. A bare IP matches an instance on any port.
+ */
+export function pickInstance(
+  name: string,
+  locations: Array<Pick<Location, 'ip'>>,
+  nodeIp?: string,
+): string {
+  const wanted = nodeIp?.trim();
+  if (!wanted) {
+    const first = locations[0]?.ip;
+    if (!first) throw new Error(`${name} has no running instance.`);
+    return first;
+  }
+  const wantedEndpoint = instanceEndpoint(wanted);
+  const hostOnly = !wanted.includes(':');
+  const found = locations.find((location) => {
+    let endpoint: string;
+    try {
+      endpoint = instanceEndpoint(location.ip);
+    } catch {
+      return false;
+    }
+    return (
+      endpoint === wantedEndpoint ||
+      (hostOnly && endpoint.startsWith(`${wantedEndpoint.replace(/:\d+$/, '')}:`))
+    );
+  });
+  if (!found) {
+    const running = locations.map((location) => location.ip).join(', ');
+    throw new Error(
+      `${wanted} is not running ${name}. Pass the address of one of its instances${running ? `: ${running}` : ''}.`,
+    );
+  }
+  return found.ip;
+}
+
+/**
+ * The addresses FluxOS pairs a deployment payment with (fluxapps.addressMultisig
+ * and addressMultisigB in ZelBack/config/default.js; explorerService counts no
+ * others). The address a node reports is checked against them, so the node
+ * answering /apps/deploymentinformation cannot have the payment sent to itself.
+ */
+export const DEPLOYMENT_ADDRESSES: readonly string[] = [
+  't3NryfAQLGeFs9jEoeqsxmBN2QLRaRKFLUX',
+  't3aGJvdtd8NR6GrnqnRuVEzH6MbrXuJFLUX',
+];
+
+export function checkDeploymentAddress(address: string): string {
+  if (!DEPLOYMENT_ADDRESSES.includes(address)) {
+    throw new Error(
+      `The network reported ${JSON.stringify(address)} as the deployment address, which is not a Flux deployment address. Nothing was paid.`,
+    );
+  }
+  return address;
+}
+
+/**
+ * Paths at which two specifications differ, compared by value: key order is
+ * ignored, everything else (types included) must match.
+ */
+export function specDifferences(expected: unknown, actual: unknown, at = 'spec'): string[] {
+  if (Array.isArray(expected) || Array.isArray(actual)) {
+    if (!Array.isArray(expected) || !Array.isArray(actual)) return [at];
+    if (expected.length !== actual.length) return [`${at}.length`];
+    return expected.flatMap((item, i) => specDifferences(item, actual[i], `${at}[${i}]`));
+  }
+  if (
+    expected !== null &&
+    actual !== null &&
+    typeof expected === 'object' &&
+    typeof actual === 'object'
+  ) {
+    const a = expected as Record<string, unknown>;
+    const b = actual as Record<string, unknown>;
+    const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])];
+    return keys.flatMap((key) =>
+      key in a && key in b ? specDifferences(a[key], b[key], `${at}.${key}`) : [`${at}.${key}`],
+    );
+  }
+  return Object.is(expected, actual) ? [] : [at];
+}
+
+/**
+ * The hash FluxOS gives a signed app message: sha256 hex of type, version,
+ * the formatted spec, timestamp and signature (registryManager
+ * registerAppGlobalyApi, advancedWorkflows updateAppGlobaly). Computed here so
+ * the payment carries the hash of the message that was signed, not whatever
+ * the node answered.
+ */
+export function messageHash(
+  type: string,
+  formatted: AppSpec,
+  timestamp: number,
+  signature: string,
+): string {
+  return createHash('sha256')
+    .update(signablePayload(formatted, timestamp, type) + signature)
+    .digest('hex');
+}
+
+/**
  * Where to send a registration. The load balancer at FLUX_API_URL comes
  * first: sessions are self-signed and valid on every node, so no affinity is
  * needed and it is the most reliable front door. If it refuses, a few healthy
@@ -146,7 +252,10 @@ export interface EnterpriseInput {
 export interface Plan {
   action: 'register' | 'update';
   spec: AppSpec;
-  /** The node's own formatting of the spec: this is what gets signed. */
+  /**
+   * The node's formatting of the spec, which is what gets signed. It has been
+   * checked to say exactly what `spec` says; only key order may differ.
+   */
   formatted: AppSpec;
   previous: PublishedAppSpec | null;
   quote: Quote;
@@ -198,21 +307,40 @@ export async function plan(
       : '/apps/verifyappregistrationspecifications';
 
   // Try the balancer, then probed nodes; a validation error is final, a
-  // node-side failure moves on to the next candidate.
+  // node-side failure moves on to the next candidate. What comes back must be
+  // the specification that was sent (key order aside): it is what gets signed,
+  // so a node that changed an image, a command or an env value would otherwise
+  // have the owner sign its version.
   let node: FluxClient | undefined;
   let candidate = spec;
   let formatted: AppSpec | undefined;
+  let encrypted: AppSpec | undefined;
   let lastError: unknown;
   for (const source of nodeSources) {
     if (node) break;
-    for (const attempt of await source()) {
+    const attempts = await source();
+    if (options.enterprise && !encrypted) {
+      // Several ArcaneOS nodes must agree on the key the components are
+      // encrypted to, or one node could have them encrypted to itself. A
+      // pinned FLUX_NODE_URL is trusted alone, as it is for everything else.
+      const publicKey = await agreedAppPublicKey(attempts, spec.owner, spec.name, {
+        minimum: config.nodeUrl ? 1 : 2,
+      });
+      encrypted = encryptEnterprise(publicKey, spec, options.enterprise);
+    }
+    const toVerify = encrypted ?? spec;
+    for (const attempt of attempts) {
       try {
-        let toVerify = spec;
-        if (options.enterprise) {
-          const session = currentSession(wallet.owner.wif);
-          toVerify = await encryptEnterprise(attempt, session, spec, options.enterprise);
+        const reply = await attempt.post<AppSpec>(verifyPath, toVerify, { timeoutMs: 120000 });
+        const changed = specDifferences(toVerify, reply);
+        if (changed.length) {
+          lastError = new Error(
+            `${attempt.baseUrl} answered with a different specification (${changed.slice(0, 5).join(', ')})`,
+          );
+          log(`${(lastError as Error).message}; nothing was signed, trying another node`);
+          continue;
         }
-        formatted = await attempt.post<AppSpec>(verifyPath, toVerify, { timeoutMs: 120000 });
+        formatted = reply;
         candidate = toVerify;
         node = attempt;
         break;
@@ -239,6 +367,7 @@ export async function plan(
     lb.get<{ blocks: number }>('/daemon/getinfo', { timeoutMs: 20000 }),
     explorer(config).balance(wallet.payer.fluxAddress),
   ]);
+  checkDeploymentAddress(deployment.address);
   const height = info.blocks;
 
   const minimum = consensusMinimumFlux(candidate, deployment.price, height);
@@ -304,13 +433,16 @@ export async function execute(
   );
   const session = currentSession(wallet.owner.wif);
   const message = { type, version: 1, appSpecification: prepared.formatted, timestamp, signature };
-  const hash = await prepared.node.post<string>(
+  const hash = messageHash(type, prepared.formatted, timestamp, signature);
+  const answered = await prepared.node.post<string>(
     prepared.action === 'update' ? '/apps/appupdate' : '/apps/appregister',
     message,
     { session, timeoutMs: 180000 },
   );
-  if (typeof hash !== 'string' || hash.length !== 64) {
-    throw new Error(`Node returned an unexpected message hash: ${JSON.stringify(hash)}`);
+  if (answered !== hash) {
+    throw new Error(
+      `${prepared.node.baseUrl} answered with message hash ${JSON.stringify(answered)}, but the signed message hashes to ${hash}. Nothing was paid.`,
+    );
   }
   log(`message broadcast, hash ${hash}`);
 
@@ -321,6 +453,7 @@ export async function execute(
     lb.get<DeploymentInformation>('/apps/deploymentinformation', { timeoutMs: 30000 }),
     lb.get<{ blocks: number }>('/daemon/getinfo', { timeoutMs: 20000 }),
   ]);
+  checkDeploymentAddress(freshDeployment.address);
   if (freshDeployment.address !== prepared.deployment.address) {
     throw new Error('Deployment address changed between quote and payment; nothing was paid.');
   }

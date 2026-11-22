@@ -25,7 +25,7 @@ import {
 } from 'node:crypto';
 import type { KeyObject } from 'node:crypto';
 import type { FluxClient } from './fluxapi.js';
-import type { Session } from './keys.js';
+import { createSession, generateIdentity, type Session } from './keys.js';
 import type { AppComponent, AppSpec } from './spec.js';
 
 function toPublicKey(raw: string): KeyObject {
@@ -50,21 +50,56 @@ export function buildEnterpriseBlob(publicKey: KeyObject, plaintextJson: string)
 }
 
 /**
- * Encrypt `compose` and `contacts` into the envelope. The node's app public
- * key is fetched through an owner session (a 'user' privileged endpoint).
+ * The key an app's enterprise content is encrypted to, taken only when at
+ * least `minimum` ArcaneOS nodes return the same one and none returns another.
+ * A single node's answer would let that node have the secrets encrypted to a
+ * key of its own. /apps/getpublickey needs a user session but not the owner's,
+ * so the nodes are asked with a throwaway identity: the owner's session, valid
+ * on every node for hours, is not handed to nodes picked for this.
  */
-export async function encryptEnterprise(
-  node: FluxClient,
-  session: Session,
+export async function agreedAppPublicKey(
+  nodes: Array<Pick<FluxClient, 'post' | 'baseUrl'>>,
+  owner: string,
+  name: string,
+  { minimum = 2 }: { minimum?: number } = {},
+): Promise<KeyObject> {
+  const session = createSession(generateIdentity().wif);
+  const answers = await Promise.all(
+    nodes.map(async (node) => {
+      try {
+        const raw = await node.post<string>(
+          '/apps/getpublickey',
+          { owner, name },
+          { session, timeoutMs: 60000 },
+        );
+        const key = toPublicKey(raw);
+        return { key, der: key.export({ type: 'spki', format: 'der' }).toString('base64') };
+      } catch {
+        return undefined;
+      }
+    }),
+  );
+  const keys = answers.filter((answer) => answer !== undefined);
+  if (new Set(keys.map((answer) => answer.der)).size > 1) {
+    throw new Error(
+      'ArcaneOS nodes returned different encryption keys for this app; nothing was encrypted. Try again.',
+    );
+  }
+  const [agreed] = keys;
+  if (!agreed || keys.length < minimum) {
+    throw new Error(
+      `${keys.length} of ${nodes.length} ArcaneOS nodes returned the app's encryption key; ${minimum} must agree before private components are encrypted to it. Try again.`,
+    );
+  }
+  return agreed.key;
+}
+
+/** Encrypt `compose` and `contacts` into the envelope, to the app's public key. */
+export function encryptEnterprise(
+  publicKey: KeyObject,
   spec: AppSpec,
   plaintext: { compose: AppComponent[]; contacts: string[] },
-): Promise<AppSpec> {
-  const raw = await node.post<string>(
-    '/apps/getpublickey',
-    { owner: spec.owner, name: spec.name },
-    { session, timeoutMs: 60000 },
-  );
-  const publicKey = toPublicKey(raw);
+): AppSpec {
   const blob = buildEnterpriseBlob(
     publicKey,
     JSON.stringify({ contacts: plaintext.contacts, compose: plaintext.compose }),

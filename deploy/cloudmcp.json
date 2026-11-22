@@ -6,16 +6,12 @@
   "compose": [
     {
       "name": "mcp",
-      "description": "Streamable HTTP MCP endpoint at /mcp, stateless, holds no keys. Installs the npm package on start.",
-      "repotag": "node:22-bookworm-slim",
+      "description": "Streamable HTTP MCP endpoint at /mcp, stateless, holds no keys. Runs the CI-built image (frozen lockfile, non-root).",
+      "repotag": "ghcr.io/runonflux/flux-cloud-mcp:0.2.9",
       "ports": [35127],
       "domains": ["mcp.runonflux.com,mcp.runonflux.io"],
       "environmentParameters": ["PORT=3000"],
-      "commands": [
-        "sh",
-        "-c",
-        "npm install -g --no-fund --no-audit @runonflux/flux-cloud-mcp@0.2.8 && exec flux-cloud-mcp-http"
-      ],
+      "commands": [],
       "containerPorts": [3000],
       "containerData": "/data",
       "cpu": 0.5,

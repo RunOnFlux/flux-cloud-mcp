@@ -17,9 +17,9 @@ import {
   appLocations,
   execute,
   explorer,
+  pickInstance,
   plan,
   publishedSpec,
-  selectNodes,
   waitForApp,
   walletFromConfig,
   type EnterpriseInput,
@@ -50,7 +50,7 @@ import {
 } from './spec.js';
 
 export const SERVER_NAME = 'flux-cloud';
-export const SERVER_VERSION = '0.2.8';
+export const SERVER_VERSION = '0.2.9';
 
 // ---------------------------------------------------------------------------
 // Schemas shared by several tools
@@ -634,17 +634,36 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
         note: `Private app owned by ${spec.owner}; the configured key is ${owner.zelid}, which cannot decrypt it.`,
       };
     }
+    // The owner's session goes only to nodes already running the app (or a
+    // pinned FLUX_NODE_URL). They hold its decrypted spec anyway, and running
+    // an enterprise app shows they are ArcaneOS nodes, which a node's own
+    // report of its version does not: any node can claim it, receive the
+    // session and use it to read the owner's private specs.
+    const nodes = config.nodeUrl
+      ? [new FluxClient(config.nodeUrl, config.requestTimeoutMs)]
+      : (await appLocations(api(config), spec.name)).slice(0, 3).flatMap((location) => {
+          try {
+            return [new FluxClient(instanceEndpoint(location.ip), config.requestTimeoutMs)];
+          } catch {
+            return [];
+          }
+        });
+    if (!nodes.length) {
+      return {
+        compose: [],
+        source: 'unavailable',
+        note: 'Private app with no running instance: its components can be read once an instance runs.',
+      };
+    }
     const session = currentSession(config.ownerWif);
     let lastError: unknown;
-    for (const source of await selectNodes(config, { arcane: true, count: 3 })) {
-      for (const node of await source()) {
-        try {
-          const content = await fetchPrivateSpec(node, session, spec.owner, spec.name);
-          privateCache.set(spec.name, { hash: spec.hash, compose: content.compose });
-          return { compose: content.compose, source: 'private' };
-        } catch (error) {
-          lastError = error;
-        }
+    for (const node of nodes) {
+      try {
+        const content = await fetchPrivateSpec(node, session, spec.owner, spec.name);
+        privateCache.set(spec.name, { hash: spec.hash, compose: content.compose });
+        return { compose: content.compose, source: 'private' };
+      } catch (error) {
+        lastError = error;
       }
     }
     return {
@@ -668,8 +687,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
     const lb = api(baseConfig);
     const [spec, locations] = await Promise.all([publishedSpec(lb, name), appLocations(lb, name)]);
     if (!spec) throw new Error(`${name} is not registered on the network.`);
-    const target = nodeIp ?? locations[0]?.ip;
-    if (!target) throw new Error(`${name} has no running instance.`);
+    const target = pickInstance(name, locations, nodeIp);
     if (!Array.isArray(spec.compose)) return { target, container: name, components: [] };
     const discovered = await componentsFor(config, spec);
     const names = discovered.compose.map((c) => c.name);
@@ -1259,7 +1277,7 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
         nodeIp: z
           .string()
           .optional()
-          .describe('ip[:port] of the instance; defaults to the first running one.'),
+          .describe("ip[:port] of one of the app's running instances; defaults to the first one."),
       },
     },
     async ({ name, component, lines, nodeIp }, config) => {
@@ -1293,7 +1311,10 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
       inputSchema: {
         name: z.string(),
         component: z.string().optional().describe('Component name for multi-component apps.'),
-        nodeIp: z.string().optional(),
+        nodeIp: z
+          .string()
+          .optional()
+          .describe("ip[:port] of one of the app's running instances; defaults to the first one."),
       },
     },
     async ({ name, component, nodeIp }, config) => {
@@ -1335,15 +1356,16 @@ export function createServer(baseConfig: Config, options: ServerOptions = {}): M
         nodeIp: z
           .string()
           .optional()
-          .describe('Required for scope=node; also the node the global command is sent through.'),
+          .describe(
+            "ip[:port] of one of the app's running instances. Required for scope=node; also the node a global command is sent through.",
+          ),
         hard: z.boolean().default(false).describe('For redeploy: also delete the app data.'),
       },
     },
     async ({ name, action, scope, nodeIp, hard }, config) => {
       try {
         const session = currentSession(requireOwnerWif(config));
-        const target = nodeIp ?? (await appLocations(api(config), name))[0]?.ip;
-        if (!target) throw new Error(`${name} has no running instance.`);
+        const target = pickInstance(name, await appLocations(api(config), name), nodeIp);
         const node = new FluxClient(instanceEndpoint(target), config.requestTimeoutMs);
         const global = scope === 'global';
         const path =
