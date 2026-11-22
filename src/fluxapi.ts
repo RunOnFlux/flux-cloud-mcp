@@ -233,8 +233,19 @@ export async function findHealthyNodes(
   return healthy.slice(0, count);
 }
 
-/** `http://ip:port` for an app instance reported by /apps/location. */
+const IPV4_OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
+const NODE_ADDRESS = new RegExp(`^(${IPV4_OCTET}(?:\\.${IPV4_OCTET}){3})(?::(\\d{1,5}))?$`);
+
+/**
+ * `http://ip:port` for an app instance reported by /apps/location. Only a bare
+ * IPv4 address with an optional port is accepted, so the value can never add a
+ * host name, credentials or a path to the URL the owner's session is sent to.
+ */
 export function instanceEndpoint(ip: string): string {
-  const [host, port] = ip.split(':');
-  return `http://${host}:${port ?? '16127'}`;
+  const match = NODE_ADDRESS.exec(ip.trim());
+  const port = match?.[2] === undefined ? 16127 : Number(match[2]);
+  if (!match || !(port >= 1 && port <= 65535)) {
+    throw new Error(`Not a node address: ${JSON.stringify(ip)}. Expected ip or ip:port.`);
+  }
+  return `http://${match[1]}:${port}`;
 }
